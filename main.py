@@ -1,5 +1,5 @@
 import pandas as pd
-from constants import GRAVITY, AIR_DENSITY, C_DRAG
+from data.constants import GRAVITY, AIR_DENSITY, C_DRAG
 
 class RocketModel:
     def __init__(self, burn_time, m_dry, m_wet, thrust=4500, area=0.1):
