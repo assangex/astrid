@@ -1,176 +1,237 @@
 import pandas as pd
 import numpy as np
-from data.constants import GRAVITY, C_DRAG
 import logging
-import os 
+import os
+import math
+import matplotlib.pyplot as plt
+from data.constants import GRAVITY
+from libs.logo import astrid_logo
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-class RocketModel:
-    def __init__(self, df: pd.DataFrame, burn_time: float, m_dry: float, m_wet: float, thrust: float, of_ratio: float, prop_frac: float, area: float = 0.1016, time_inc: float = 0.1):
+def clamp(value, min_val, max_val):
+    return max(min(value, max_val), min_val)
+
+class Astrid:
+    def __init__(self, df: pd.DataFrame, thrust_data: pd.Series, burn_time: float, m_wet: float, of_ratio: float, prop_frac: float, area: float, time_inc: float = 0.10, launch_altitude: float = 0, cd_data: pd.DataFrame = None):
         self.burn_time = burn_time
         self.of_ratio = of_ratio
         self.prop_frac = prop_frac
-        self.density = df['Density(kg/m^3)']
-        self.m_dry = m_dry
-        self.m_wet = m_wet * (1 - prop_frac) + m_dry  
-        self.thrust = thrust
-        self.area = area  # m^2    
-        self.i_velocity = 0  # m/s
-        self.i_altitude = 0  # m
-        self.time_inc = time_inc 
+        self.density = df["Density(kg/m^3)"].tolist()
+        self.m_wet = m_wet
+        self.thrust_data = thrust_data
+        self.area = area
+        self.time_inc = time_inc
+        self.i_altitude = launch_altitude
+        self.cd_data = cd_data
         self.results = []
 
-        # Calculate the propellant weight
-        self.prop_weight = self.m_wet - self.m_dry
-        self.fuel_mass = self.prop_weight / (1 + self.of_ratio)
-        self.ox_mass = self.prop_weight - self.fuel_mass
-
-        # Track maximum values
         self.max_mach = 0
         self.max_altitude = 0
         self.max_acceleration = 0
         self.max_g_force = 0
         self.max_q = 0
+        self.max_velocity = 0
+        self.apogee_time = 0
 
-    def f_drag(self, v: float, area: float, density: float) -> float:
-        return C_DRAG * density * (v ** 2) * 0.5 * area
+        self.total_prop_mass = self.prop_frac * m_wet
+        self.fuel_mass = self.total_prop_mass / (1 + self.of_ratio)
+        self.ox_mass = self.total_prop_mass - self.fuel_mass
+        self.current_mass = m_wet
 
-    def weight(self, m: float) -> float:
-        return m * GRAVITY
+        self.mass_dot = self.total_prop_mass / burn_time
+        self.isp = self.thrust_data.mean() / (self.mass_dot * GRAVITY)
+        self.total_impulse = self.thrust_data.sum() * self.time_inc
+        self.average_thrust = self.thrust_data.mean()
 
-    def acceleration(self, f_net: float, m: float) -> float:
-        return f_net / m
+        self.main_cd = 1.9
+        self.main_diameter = 3.6576
+        self.drogue_cd = 0.97
+        self.drogue_diameter = 0.9144
+        self.main_area = math.pi * (self.main_diameter / 2) ** 2
+        self.drogue_area = math.pi * (self.drogue_diameter / 2) ** 2
 
-    def velocity(self, v0: float, a: float, t: float) -> float:
-        return (a * t) + v0
+        logging.info(f"Specific Impulse (Isp): {self.isp:.2f} seconds")
+        logging.info(f"Mass Flow Rate: {self.mass_dot:.4f} kg/s")
+        logging.info(f"Total Impulse: {self.total_impulse:.2f} Ns")
+        logging.info(f"Average Thrust: {self.average_thrust:.2f} N")
 
-    def altitude(self, h0: float, v0: float, t: float, a: float) -> float:
-        return v0 * t + 0.5 * a * t**2 + h0
-
-    def get_density(self, current_altitude: float) -> float:
-        if pd.isna(current_altitude) or current_altitude < 0:
-            return self.density.iloc[-1]  # Use the last known density as a fallback if altitude is NaN or negative
-
-        rounded_altitude = int(current_altitude // 100)  # Round down to nearest 100 meters
-        if rounded_altitude in self.density.index:
-            density = self.density.loc[rounded_altitude]
+    def get_cd(self, time: float, altitude: float, mach: float) -> float:
+        if time < self.burn_time:
+            cd = np.interp(mach, self.cd_data["Mach"], self.cd_data["CD"])
         else:
-            density = self.density.iloc[-1]  # Refer to previous density if altitude exceeds known range
-        return density
+            # After burn time, determine the Cd based on altitude
+            if altitude > 1250:
+                cd = self.drogue_cd
+            else:
+                cd = self.main_cd
+
+        return cd
+
+    def drag(self, altitude: float, velocity: float, density: float, time: float) -> float:
+        mach_value = self.mach(velocity)
+        cd = self.get_cd(time, altitude, mach_value)
+        if velocity < 0:
+            if altitude <= 1000:
+                return -0.5 * self.main_cd * density * velocity**2 * self.main_area
+            elif altitude <= 1375:
+                return -0.5 * self.drogue_cd * density * velocity**2 * self.drogue_area
+        return 0.5 * cd * density * velocity**2 * self.area
+
+    def weight(self) -> float:
+        return self.current_mass * GRAVITY
+
+    def acceleration(self, force: float) -> float:
+        return force / self.current_mass
+
+    def velocity(self, v0: float, a: float) -> float:
+        return v0 + a * self.time_inc
+
+    def altitude(self, h0: float, v0: float, a: float) -> float:
+        return h0 + v0 * self.time_inc + 0.5 * a * self.time_inc**2
+
+    def get_density(self, altitude: float) -> float:
+        index = clamp(int(altitude // 50), 0, len(self.density) - 1)
+        return self.density[index]
+
+    def ve(self) -> float:
+        return self.isp * GRAVITY
+
+    def f_thrust(self, current_time: float) -> float:
+        index = clamp(int(current_time // self.time_inc), 0, len(self.thrust_data) - 1)
+        return self.thrust_data.iloc[index]
 
     def mach(self, velocity: float, speed_of_sound: float = 343) -> float:
         return velocity / speed_of_sound
 
     def maxq(self, density: float, velocity: float) -> float:
-        return 0.5 * density * velocity
+        return 0.5 * density * velocity**2
 
-    def deployment(self, altitude: float, velocity: float, main_dep: float, drogue_dep: float, density: float, main_cd: float, drogue_cd: float, drag_coefficient: float) -> float:
-        if velocity < 0:
-            if altitude < main_dep:
-                return -0.5 * main_cd * density * velocity**2 * self.area
-            else:
-                return -0.5 * drogue_cd * density * velocity**2 * self.area
-        else:
-            return 0.5 * drag_coefficient * density * velocity**2 * self.area
-
-    def simulate(self) -> list:
+    def simulate(self):
         current_time = 0
-        current_mass = self.m_wet  
-        current_altitude = self.i_altitude  
+        current_velocity = 0
+        current_altitude = self.i_altitude
+        main_deployed = False
+        drogue_deployed = False
 
-        # i conditions at t=0
         self.results.append({
             "Time": current_time,
             "Net Force": 0,
             "Drag Force": 0,
             "Thrust": 0,
-            "Weight": self.weight(current_mass),
+            "Weight": self.weight(),
             "Acceleration": 0,
-            "Velocity": 0,
-            "Altitude": self.i_altitude,
-            "Density": self.get_density(self.i_altitude),
+            "Velocity": current_velocity,
+            "Altitude": current_altitude,
+            "Density": self.get_density(current_altitude),
             "Mach": 0,
             "Max Q": 0,
             "Status": "Climbing"
         })
 
-        # Update i conditions for the next step
-        self.i_velocity = 0
-        self.i_altitude = 0
-        current_time += self.time_inc
-
         while True:
-            # Calculate mass based on the burn time
             if current_time < self.burn_time:
                 fuel_consumed = (self.fuel_mass / self.burn_time) * self.time_inc
                 ox_consumed = (self.ox_mass / self.burn_time) * self.time_inc
-                current_mass -= (fuel_consumed + ox_consumed)
+                self.current_mass -= (fuel_consumed + ox_consumed)
             else:
-                current_mass = self.m_dry
+                self.current_mass = self.m_wet - self.total_prop_mass
 
-            # Use the Thrust(N) value from the dataset for the current time step
-            time_index = int(current_time // self.time_inc)
-            if time_index < len(self.density):
-                f_thrust = self.thrust
-            else:
-                f_thrust = 0  # No thrust after the provided thrust data ends
-
-            # Grab the current density based on altitude
             density = self.get_density(current_altitude)
+            f_drag = self.drag(current_altitude, current_velocity, density, current_time)
+            f_net = self.f_thrust(current_time) - f_drag - self.weight()
+            a = self.acceleration(f_net)
+            current_velocity = self.velocity(current_velocity, a)
+            mach_value = self.mach(current_velocity)
+            current_altitude = self.altitude(current_altitude, current_velocity, a)
+            maxq = self.maxq(density, current_velocity)
+            status = "Climbing" if current_altitude > self.i_altitude else "Descending"
 
-            # Calculate net force, acceleration, velocity, altitude, drag force, max q
-            f_drag = self.deployment(current_altitude, self.i_velocity, 300, 3049.753836, density, 1.2, 0.97, C_DRAG)
-            f_net = f_thrust - f_drag - self.weight(current_mass)
-            a = self.acceleration(f_net, current_mass)
-            
-            
-            v = self.velocity(self.i_velocity, a, self.time_inc)
-            mach_value = self.mach(v)
-            h = self.altitude(self.i_altitude, self.i_velocity, self.time_inc, a)
-            maxq = self.maxq(density, v)
-            status = "Climbing" if h > self.i_altitude else "Descending"
-            if status == "Descending" and h < 0:
-                 break
+            if not main_deployed and current_altitude <= 1000 and current_velocity < 0:
+                status = "Main Parachute Deployed"
+                main_deployed = True
 
-            # Track maximum values
+            if not drogue_deployed and current_altitude <= 1375 and current_velocity < 0:
+                status = "Drogue Parachute Deployed"
+                drogue_deployed = True
+
+            if current_altitude > self.max_altitude:
+                self.max_altitude = current_altitude
+                self.apogee_time = current_time
+
             self.max_mach = max(self.max_mach, mach_value)
-            self.max_altitude = max(self.max_altitude, h)
             self.max_acceleration = max(self.max_acceleration, a)
+            self.max_velocity = max(self.max_velocity, current_velocity)
             g_force = a / GRAVITY
             self.max_g_force = max(self.max_g_force, g_force)
             self.max_q = max(self.max_q, maxq)
 
-            # Store the results for the current time step
             self.results.append({
                 "Time": current_time,
                 "Net Force": f_net,
                 "Drag Force": f_drag,
-                "Thrust": f_thrust,
-                "Weight": self.weight(current_mass),
+                "Thrust": self.f_thrust(current_time),
+                "Weight": self.weight(),
                 "Acceleration": a,
-                "Velocity": v,
-                "Altitude": h,
+                "Velocity": current_velocity,
+                "Altitude": current_altitude,
                 "Density": density,
                 "Mach": mach_value,
                 "Status": status
             })
 
-            # Update i conditions for the next step
-            self.i_velocity = v
-            self.i_altitude = h
-            current_altitude = h  # Update current altitude
             current_time += self.time_inc
 
-        return self.results
+            if status == "Descending" and current_altitude < 0:
+                break
 
-    def save_results(self, filename: str):
+        self.m_dry = self.current_mass
+        logging.info(f"Final Dry Mass: {self.m_dry:.2f} kg")
+        logging.info(f"Time of Apogee: {self.apogee_time:.2f} seconds")
+
+    def save(self, filename: str):
         df_results = pd.DataFrame(self.results)
         df_results.to_csv(filename, index=False)
         logging.info(f"Results saved to {filename}")
         if os.path.exists(filename):
-            logging.info(f"File size: {os.path.getsize(filename) / 1024:.2f}")
+            logging.info(f"File size: {os.path.getsize(filename) / 1024:.2f} KB")
+
+    def plot(self):
+        times = [result['Time'] for result in self.results]
+        altitudes = [result['Altitude'] for result in self.results]
+        thrusts = [result["Thrust"] for result in self.results]
+        velocities = [result['Velocity'] for result in self.results]
+        accelerations = [result['Acceleration'] for result in self.results]
+
+        plt.figure(figsize=(10, 8))
+
+        plt.subplot(3, 1, 1)
+        plt.plot(times, altitudes, label='Altitude (m)', color='red')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Altitude (m)')
+        plt.title('Rocket Altitude over Time')
+        plt.grid(True)
+        plt.legend()
+
+        plt.subplot(3, 1, 2)
+        plt.plot(times, velocities, label='Velocity (m/s)', color='green')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Velocity (m/s)')
+        plt.title('Rocket Velocity over Time')
+        plt.grid(True)
+        plt.legend()
+
+        plt.subplot(3, 1, 3)
+        plt.plot(times, thrusts, label='Thrust (N)', color='purple')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Acceleration (m/s²) / Thrust (N)')
+        plt.title('Thrust over Time')
+        plt.grid(True)
+        plt.legend()
+
+        plt.tight_layout()
+        plt.show()
 
     def print_results(self):
         for result in self.results:
@@ -179,37 +240,62 @@ class RocketModel:
                          f"Acceleration: {result['Acceleration']:.2f} m/s², Velocity: {result['Velocity']:.2f} m/s (Mach {result['Mach']:.2f}), "
                          f"Altitude: {result['Altitude']:.2f} m, Status: {result['Status']}")
 
+        astrid_logo()
+
         logging.info(f"\nMax Mach: {self.max_mach:.2f}")
-        logging.info(f"Apogee: {self.max_altitude:.2f} m")
+        logging.info(f"Apogee: {self.max_altitude:.2f} m at {self.apogee_time:.2f} seconds")
         logging.info(f"Max Acceleration: {self.max_acceleration:.2f} m/s²")
         logging.info(f"Max G's: {self.max_g_force:.2f} g")
         logging.info(f"Max Q: {self.max_q:.2f} Pa")
+        logging.info(f"Max Velocity: {self.max_velocity:.2f} m/s")
+        logging.info(f"Final Dry Mass: {self.m_dry:.2f} kg")
+        logging.info(f"Mass Flow Rate: {self.mass_dot:.4f} kg/s")
+        logging.info(f"Ox Mass: {self.ox_mass:.2f} kg")
+        logging.info(f"Fuel Mass: {self.fuel_mass:.2f} kg")
+        logging.info(f"Exhaust Velocity: {self.ve():.2f} m/s")
+        logging.info(f"Impulse: {self.total_impulse:2f}")
 
+def adjust_data_length(data: pd.Series, target_length: int) -> pd.Series:
+    actual_length = len(data)
+    
+    if actual_length < target_length:
+        # If the data points are fewer, interpolate to match the points
+        data = np.interp(
+            np.linspace(0, actual_length - 1, target_length),
+            np.arange(actual_length),
+            data
+        )
+    elif actual_length > target_length:
+        # If the data points are more, truncate to match the points
+        data = data.iloc[:target_length]
+
+    return pd.Series(data)
 
 if __name__ == "__main__":
     try:
-        # Load the data
-        df = pd.read_csv('/home/sabir/Apps/Code/code/projects/astrid/data/data.csv')
-        df = df.fillna(0)
+        df = pd.read_csv('/home/sabir/Apps/Code/code/projects/astrid/data/data.csv').fillna(0)
+        cd_data = pd.read_csv('/home/sabir/Apps/Code/code/projects/astrid/data/variable_CD.csv')
+        thrust_df = pd.read_csv('/home/sabir/Apps/Code/code/projects/astrid/data/thrustcurve.csv')
+        thrust_df['New Thrust'] = thrust_df['Thrust'] * 4
 
-        #'BurnTime(s)' column
-        burn_time = 13.5 
-        thrust = 4500
+        burn_time = 12
+        thrust = 5500
+        m_wet = 65
+        of_ratio = 5.5
+        prop_frac = 0.53
+        area = math.pi * (8 * 0.0254 / 2) ** 2
+        launch_altitude = 1350
+        time_inc = 0.05
 
-        # Set other parameters
-        m_dry = 1.4500  # in kg
-        m_wet = 100  # in kg
-        of_ratio = 2.5  # Filler o/f
-        prop_frac = 0.9  # Filler propfrac
+        # Adjust the thrust data length to match the required number of points
+        required_points = int(burn_time / time_inc)
+        adjusted_thrust_data = adjust_data_length(thrust_df['New Thrust'], required_points)
 
-        # RocketModel instance
-        rocket = RocketModel(df, burn_time=burn_time, thrust=thrust, m_dry=m_dry, m_wet=m_wet, of_ratio=of_ratio, prop_frac=prop_frac)
-        # Run simulation
+        rocket = Astrid(df, burn_time=burn_time, m_wet=m_wet, thrust_data=adjusted_thrust_data, of_ratio=of_ratio, prop_frac=prop_frac, launch_altitude=launch_altitude, cd_data=cd_data, area=area, time_inc=time_inc)
         rocket.simulate()
-        # result saving 
-        rocket.save_results('astrid.csv')
-
-        # Print result        rocket.print_results()
+        rocket.save('astrid.csv')
+        rocket.print_results()
+        rocket.plot()
 
     except Exception as e:
         logging.error(f"An error occurred: {e}")
