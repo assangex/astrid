@@ -1,3 +1,6 @@
+#Made by assangex <3 
+#v.2.0
+#Tolu don't you dare use this#
 import pandas as pd
 import numpy as np
 import logging
@@ -13,8 +16,10 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 def clamp(value, min_val, max_val):
     return max(min(value, max_val), min_val)
 
+
 class Astrid:
-    def __init__(self, df: pd.DataFrame, thrust_data: pd.Series, burn_time: float, m_wet: float, of_ratio: float, prop_frac: float, area: float, time_inc: float = 0.10, launch_altitude: float = 0, cd_data: pd.DataFrame = None):
+    def __init__(self, df: pd.DataFrame, thrust_data: pd.Series, burn_time: float, m_wet: float, of_ratio: float, prop_frac: float, area: float, oxidizer_density: float, ox_pressure: float, internal_radius: float, tank_thickness: float, material_yield_strength: float, safety_factor: float, time_inc: float = 0.10, launch_altitude: float = 0, cd_data: pd.DataFrame = None):
+        # Existing parameters
         self.burn_time = burn_time
         self.of_ratio = of_ratio
         self.prop_frac = prop_frac
@@ -25,21 +30,46 @@ class Astrid:
         self.time_inc = time_inc
         self.i_altitude = launch_altitude
         self.cd_data = cd_data
+        self.max_altitude = max
         self.results = []
 
-        self.max_mach = 0
-        self.max_altitude = 0
-        self.max_acceleration = 0
-        self.max_g_force = 0
-        self.max_q = 0
-        self.max_velocity = 0
-        self.apogee_time = 0
+        # Oxidizer Tank Parameters
+        self.oxidizer_density = oxidizer_density
+        self.ox_pressure = ox_pressure
+        self.internal_radius = internal_radius
+        self.tank_thickness = tank_thickness
+        self.material_yield_strength = material_yield_strength
+        self.safety_factor = safety_factor
 
-        self.total_prop_mass = self.prop_frac * m_wet
-        self.fuel_mass = self.total_prop_mass / (1 + self.of_ratio)
-        self.ox_mass = self.total_prop_mass - self.fuel_mass
-        self.current_mass = m_wet
+        # Calculate initial oxidizer properties
+        self.total_ox_mass = self.prop_frac * self.m_wet  # Total oxidizer mass
+        self.oxidizer_mass_flow_rate = self.total_ox_mass / burn_time
+        self.tank_volume = self.total_ox_mass / self.oxidizer_density  # in cubic meters
 
+        # Initialize mass properties
+        self.total_prop_mass = self.prop_frac * m_wet  # Total propellant mass
+        self.fuel_mass = self.total_prop_mass / (1 + self.of_ratio)  # Fuel mass based on O/F ratio
+        self.ox_mass = self.total_prop_mass - self.fuel_mass  # Oxidizer mass
+        
+        self.current_mass = m_wet  # Initial wet mass of the rocket
+
+        # Stress calculations
+        self.hoop_stress = (self.ox_pressure * self.internal_radius) / self.tank_thickness
+        self.longitudinal_stress = (self.ox_pressure * self.internal_radius) / (2 * self.tank_thickness)
+
+        # factor of safety checker
+        self.actual_safety_factor = self.material_yield_strength / max(self.hoop_stress, self.longitudinal_stress)
+        if self.actual_safety_factor < self.safety_factor:
+            logging.warning(f"Warning: Actual safety factor {self.actual_safety_factor:.2f} is below the required safety factor of {self.safety_factor}")
+
+        # Log results
+        logging.info(f"Oxidizer Mass Flow Rate: {self.oxidizer_mass_flow_rate:.2f} kg/s")
+        logging.info(f"Hoop Stress: {self.hoop_stress:.2f} Pa")
+        logging.info(f"Longitudinal Stress: {self.longitudinal_stress:.2f} Pa")
+        logging.info(f"Tank Volume: {self.tank_volume:.2f} m^3")
+        logging.info(f"Safety Factor: {self.actual_safety_factor:.2f}") 
+
+        # Existing initialization logic...
         self.mass_dot = self.total_prop_mass / burn_time
         self.isp = self.thrust_data.mean() / (self.mass_dot * GRAVITY)
         self.total_impulse = self.thrust_data.sum() * self.time_inc
@@ -59,13 +89,14 @@ class Astrid:
 
     def get_cd(self, time: float, altitude: float, mach: float) -> float:
         if time < self.burn_time:
-            cd = np.interp(mach, self.cd_data["Mach"], self.cd_data["CD"])
+            cd = np.interp(burn_time, self.cd_data["Cd power on"], self.cd_data["CD"])
         else:
-            # After burn time, determine the Cd based on altitude
-            if altitude > 1250:
-                cd = self.drogue_cd
-            else:
-                cd = self.main_cd
+            cd = np.interp(time, self.cd_data["Cd power off"], self.cd_data["CD"])
+            # After burn time, determine the Cd based on coast and altitude
+            # if altitude > 1250:
+            #     cd = self.drogue_cd
+            # else:
+            #     cd = self.main_cd
 
         return cd
 
@@ -233,27 +264,53 @@ class Astrid:
         plt.tight_layout()
         plt.show()
 
-    def print_results(self):
-        for result in self.results:
-            logging.info(f"Time: {result['Time']:.2f} s, Force: {result['Net Force']:.2f} N, Density: {result['Density']:.3f} kg/m³, "
-                         f"Drag Force: {result['Drag Force']:.2f} N, Weight: {result['Weight']:.2f} N, "
-                         f"Acceleration: {result['Acceleration']:.2f} m/s², Velocity: {result['Velocity']:.2f} m/s (Mach {result['Mach']:.2f}), "
-                         f"Altitude: {result['Altitude']:.2f} m, Status: {result['Status']}")
+def print_results(self):
+    # Loop through and print each result from the simulation
+    for result in self.results:
+        logging.info(f"Time: {result['Time']:.2f} s, "
+                     f"Net Force: {result['Net Force']:.2f} N, "
+                     f"Density: {result['Density']:.3f} kg/m³, "
+                     f"Drag Force: {result['Drag Force']:.2f} N, "
+                     f"Weight: {result['Weight']:.2f} N, "
+                     f"Acceleration: {result['Acceleration']:.2f} m/s², "
+                     f"Velocity: {result['Velocity']:.2f} m/s (Mach {result['Mach']:.2f}), "
+                     f"Altitude: {result['Altitude']:.2f} m, "
+                     f"Status: {result['Status']}")
 
-        astrid_logo()
+    # Print out overall results and key performance metrics
+    astrid_logo()  # Logo display
+    
+    logging.info(f"\n===== ROCKET PERFORMANCE RESULTS =====")
+    logging.info(f"Max Mach: {self.max_mach:.2f}")
+    logging.info(f"Apogee: {self.max_altitude:.2f} meters at {self.apogee_time:.2f} seconds")
+    logging.info(f"Max Acceleration: {self.max_acceleration:.2f} m/s²")
+    logging.info(f"Max G's: {self.max_g_force:.2f} g")
+    logging.info(f"Max Q: {self.max_q:.2f} Pa")
+    logging.info(f"Max Velocity: {self.max_velocity:.2f} m/s")
+    
+    logging.info(f"\n===== MASS AND PROPULSION STATS =====")
+    logging.info(f"Initial Wet Mass: {self.m_wet:.2f} kg")
+    logging.info(f"Final Dry Mass: {self.m_dry:.2f} kg")
+    logging.info(f"Oxidizer Mass: {self.ox_mass:.2f} kg")
+    logging.info(f"Fuel Mass: {self.fuel_mass:.2f} kg")
+    logging.info(f"Exhaust Velocity (Ve): {self.ve():.2f} m/s")
+    logging.info(f"Specific Impulse (Isp): {self.isp:.2f} seconds")
+    logging.info(f"Total Impulse: {self.total_impulse:.2f} Ns")
+    logging.info(f"Mass Flow Rate: {self.mass_dot:.4f} kg/s")
+    
+    logging.info(f"\n===== OXIDIZER TANK DETAILS =====")
+    logging.info(f"Oxidizer Density: {self.oxidizer_density:.2f} kg/m³")
+    logging.info(f"Oxidizer Tank Pressure: {self.ox_pressure:.2f} Pa")
+    logging.info(f"Oxidizer Mass Flow Rate: {self.oxidizer_mass_flow_rate:.2f} kg/s")
+    logging.info(f"Oxidizer Tank Volume: {self.tank_volume:.2f} m³")
+    logging.info(f"Hoop Stress: {self.hoop_stress:.2f} Pa")
+    logging.info(f"Longitudinal Stress: {self.longitudinal_stress:.2f} Pa")
+    logging.info(f"Material Yield Strength: {self.material_yield_strength:.2f} Pa")
+    logging.info(f"Actual Safety Factor: {self.actual_safety_factor:.2f}")
+    logging.info(f"Required Safety Factor: {self.safety_factor:.2f}")
 
-        logging.info(f"\nMax Mach: {self.max_mach:.2f}")
-        logging.info(f"Apogee: {self.max_altitude:.2f} m at {self.apogee_time:.2f} seconds")
-        logging.info(f"Max Acceleration: {self.max_acceleration:.2f} m/s²")
-        logging.info(f"Max G's: {self.max_g_force:.2f} g")
-        logging.info(f"Max Q: {self.max_q:.2f} Pa")
-        logging.info(f"Max Velocity: {self.max_velocity:.2f} m/s")
-        logging.info(f"Final Dry Mass: {self.m_dry:.2f} kg")
-        logging.info(f"Mass Flow Rate: {self.mass_dot:.4f} kg/s")
-        logging.info(f"Ox Mass: {self.ox_mass:.2f} kg")
-        logging.info(f"Fuel Mass: {self.fuel_mass:.2f} kg")
-        logging.info(f"Exhaust Velocity: {self.ve():.2f} m/s")
-        logging.info(f"Impulse: {self.total_impulse:2f}")
+    logging.info(f"=======================================")
+
 
 def adjust_data_length(data: pd.Series, target_length: int) -> pd.Series:
     actual_length = len(data)
@@ -273,9 +330,9 @@ def adjust_data_length(data: pd.Series, target_length: int) -> pd.Series:
 
 if __name__ == "__main__":
     try:
-        df = pd.read_csv('/home/sabir/Apps/Code/code/projects/astrid/data/data.csv').fillna(0)
-        cd_data = pd.read_csv('/home/sabir/Apps/Code/code/projects/astrid/data/variable_CD.csv')
-        thrust_df = pd.read_csv('/home/sabir/Apps/Code/code/projects/astrid/data/thrustcurve.csv')
+        df = pd.read_csv('/home/sabir/Apps/learning/code/code/projects/astrid/data/data.csv').fillna(0)
+        cd_data = pd.read_csv('/home/sabir/Apps/learning/code/code/projects/astrid/data/variablecd.csv')
+        thrust_df = pd.read_csv('/home/sabir/Apps/learning/code/code/projects/astrid/data/thrustcurve.csv')
         thrust_df['New Thrust'] = thrust_df['Thrust'] * 4
 
         burn_time = 12
@@ -285,17 +342,44 @@ if __name__ == "__main__":
         prop_frac = 0.53
         area = math.pi * (8 * 0.0254 / 2) ** 2
         launch_altitude = 1350
-        time_inc = 0.05
+        time_inc = 0.10
+
+        # New oxidizer tank parameters
+        oxidizer_density = 452  # Example: Density of liquid N2O in kg/m^3
+        ox_pressure = 2000 * 6894.76  # Convert psi to Pascals (1 psi = 6894.76 Pa)
+        internal_radius = 0.127  # Example: 5 inches converted to meters (1 inch = 0.0254 meters)
+        tank_thickness = 0.01  # Example: 10 mm wall thickness (can be changed based on materials)
+        material_yield_strength = 276e6  # Example: 6061-T6 Aluminum yield strength in Pascals
+        safety_factor = 2
 
         # Adjust the thrust data length to match the required number of points
         required_points = int(burn_time / time_inc)
         adjusted_thrust_data = adjust_data_length(thrust_df['New Thrust'], required_points)
 
-        rocket = Astrid(df, burn_time=burn_time, m_wet=m_wet, thrust_data=adjusted_thrust_data, of_ratio=of_ratio, prop_frac=prop_frac, launch_altitude=launch_altitude, cd_data=cd_data, area=area, time_inc=time_inc)
+        # Create the rocket simulation object with all required parameters
+        rocket = Astrid(df, 
+                        burn_time=burn_time, 
+                        m_wet=m_wet, 
+                        thrust_data=adjusted_thrust_data, 
+                        of_ratio=of_ratio, 
+                        prop_frac=prop_frac, 
+                        launch_altitude=launch_altitude, 
+                        cd_data=cd_data, 
+                        area=area, 
+                        time_inc=time_inc,
+                        oxidizer_density=oxidizer_density, 
+                        ox_pressure=ox_pressure, 
+                        internal_radius=internal_radius, 
+                        tank_thickness=tank_thickness, 
+                        material_yield_strength=material_yield_strength, 
+                        safety_factor=safety_factor)
+
         rocket.simulate()
         rocket.save('astrid.csv')
         rocket.print_results()
         rocket.plot()
+
+        
 
     except Exception as e:
         logging.error(f"An error occurred: {e}")
