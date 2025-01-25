@@ -1,6 +1,5 @@
 #Made by assangex <3 
 #v.1.9
-#Tolu don't you dare use this#
 import pandas as pd
 import numpy as np
 import logging
